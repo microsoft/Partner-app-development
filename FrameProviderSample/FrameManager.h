@@ -43,6 +43,9 @@ private:
     WDPP::PerceptionFaceAuthenticationGroup^ _faceAuthGroup;
     WDE::DeviceWatcher^ _deviceWatcher;
     WRLW::CriticalSection _connectionLocker;
+    WRLW::CriticalSection _destructionLocker;
+
+    bool _destructorCalled;
 
     Windows::Foundation::EventRegistrationToken _deviceAddedRegToken;
     Windows::Foundation::EventRegistrationToken _deviceRemovedRegToken;

@@ -10,7 +10,6 @@
 //*********************************************************
 
 #include "pch.h"
-#include "FrameManager.h"
 
 namespace MediaFoundationProvider {
 
@@ -18,7 +17,8 @@ SampleFrameProviderManager::SampleFrameProviderManager() :
     _providerMap(ref new Platform::Collections::Map<Platform::String^, WDPP::IPerceptionFrameProvider^>(std::less<Platform::String^>())),
     _controlGroup(nullptr),
     _faceAuthGroup(nullptr),
-    _deviceWatcher(nullptr)
+    _deviceWatcher(nullptr),
+    _destructorCalled(false)
 
 {
     // Create a DeviceWatcher to enumerate and select the target video device and also signal when changes to this device occur
@@ -84,6 +84,10 @@ SampleFrameProviderManager::SampleFrameProviderManager() :
 
 SampleFrameProviderManager::~SampleFrameProviderManager()
 {
+    auto lock = _destructionLocker.Lock();
+
+    _destructorCalled = true;
+
     if (_deviceWatcher != nullptr)
     {
         _deviceWatcher->Stop();
@@ -107,11 +111,19 @@ WDPP::IPerceptionFrameProvider^ SampleFrameProviderManager::GetFrameProvider(WDP
 
 void SampleFrameProviderManager::DeviceAddedEventHandler(WDE::DeviceWatcher^ sender, WDE::DeviceInformation^ args)
 {
-    CreateProvider(args->Id);
+    auto lock = _destructionLocker.Lock();
+
+    // Do NOT create the FrameProvider if this object's destructor has been invoked
+    if (!_destructorCalled)
+    {
+        CreateProvider(args->Id);
+    }
 }
 
 void SampleFrameProviderManager::DeviceRemovedEventHandler(WDE::DeviceWatcher^ sender, WDE::DeviceInformationUpdate^ args)
 {
+    auto lock = _destructionLocker.Lock();
+
     ReleaseProvider();
 }
 
@@ -168,32 +180,50 @@ void SampleFrameProviderManager::ReleaseProvider()
 {
     auto lock = _connectionLocker.Lock();
 
-    // Unregister the FaceAuthentication group
-    if (_faceAuthGroup != nullptr)
+    // NOTE: When SensorDataService unloads a given FrameProvider, it directly Closes (aka Disposes) the IPerceptionFrameProvider object before
+    // Closing the IPerceptionFrameProviderManager object that created it. This means, any references to the FrameProvider object are now invalid 
+    // and any API calls made using this Provider, e.g. UnregisterControlGroup, will throw an InvalidArgumentException.
+ 
+    // Do not attempt to Unregister control groups or release the FrameProvider when this manager is being destroyed
+    if (!_destructorCalled)
     {
-        WDPP::PerceptionFrameProviderManagerService::UnregisterFaceAuthenticationGroup(this, _faceAuthGroup);
-        _faceAuthGroup = nullptr;
-    }
-
-    // Unregister the ControlGroup
-    if (_controlGroup != nullptr)
-    {
-        WDPP::PerceptionFrameProviderManagerService::UnregisterControlGroup(this, _controlGroup);
-        _controlGroup = nullptr;
-    }
-
-    // Unregister our Provider object and release it
-    if (_providerMap->Size > 0)
-    {
-        auto firstItem = _providerMap->First();
-        WDPP::PerceptionFrameProviderInfo^ providerInfo = firstItem->Current->Value->FrameProviderInfo;
-        if (providerInfo != nullptr)
+        // Unregister the FaceAuthentication group
+        if (_faceAuthGroup != nullptr)
         {
-            WDPP::PerceptionFrameProviderManagerService::UnregisterFrameProviderInfo(this, providerInfo);
+            WDPP::PerceptionFrameProviderManagerService::UnregisterFaceAuthenticationGroup(this, _faceAuthGroup);
+            _faceAuthGroup = nullptr;
         }
 
+        // Unregister the ControlGroup
+        if (_controlGroup != nullptr)
+        {
+            WDPP::PerceptionFrameProviderManagerService::UnregisterControlGroup(this, _controlGroup);
+            _controlGroup = nullptr;
+        }
+
+        // Unregister our Provider object and release it
+        if (_providerMap->Size > 0)
+        {
+            auto firstItem = _providerMap->First();
+            WDPP::PerceptionFrameProviderInfo^ providerInfo = firstItem->Current->Value->FrameProviderInfo;
+            if (providerInfo != nullptr)
+            {
+                WDPP::PerceptionFrameProviderManagerService::UnregisterFrameProviderInfo(this, providerInfo);
+            }
+
+            _providerMap->Clear();
+        }
+    }
+    else
+    {
+        _faceAuthGroup = nullptr;
+        _controlGroup = nullptr;
         _providerMap->Clear();
     }
+
+    //
+    // TODO: Add any other device specific shutdown code
+    //
 }
 
 bool SampleFrameProviderManager::StartFaceAuthentication(WDPP::PerceptionFaceAuthenticationGroup^ group)
